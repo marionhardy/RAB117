@@ -1,0 +1,629 @@
+---
+title: "RAB117_report"
+author: "Marion Hardy"
+date: "2023-05-12"
+output: 
+  html_document:
+    toc: true 
+    theme: spacelab 
+    highlight: monochrome
+editor_options: 
+  chunk_output_type: console
+  markdown: 
+    wrap: 72
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, cache = TRUE, echo = FALSE, warning = F, cache.lazy = F)
+
+library(tidyverse)
+library(ggrepel)
+library(readxl)
+library(purrr)
+library(msigdbr)
+library(clusterProfiler)
+library(ReactomePA)
+library(org.Mm.eg.db)
+
+```
+
+# Introduction
+
+Analyse d'un screening CRISPR dans des cellules tryptophane neg.
+Raphaële a fourni un fichier word détaillé qui explique la manip et les
+algorithmes utilisés.
+
+Il y a trois fichiers MLE et trois RRA (triplicats biologiques) qui
+contiennent chacun un b score = une moyenne, un z score = un score qui
+prend en compte la moyenne et la déviation standard et des pval + wald
+tests + fdr.
+
+Je vais pool les trois fichiers, avoir le score z des triplicats et
+déterminer les outliers puis les comparer à ceux que Raphaële a (pour
+contrôler que je fais pas du caca). Ensuite je prendrai les outliers
+recroisés entre le MLE et RRA pour pouvoir produire les différentes
+figures dont Raphaële a besoin.
+
+```{r Data loading MLE, include=TRUE, echo=T}
+
+files = list.files("./data/", pattern = "*mle_trp*")
+
+for (i in 1:length(files)){
+  file = read_xlsx(paste0("./data/",files[i]))
+  file = file %>% filter(sgRNA >=4) %>% 
+    dplyr::select(Gene, `treatment|beta`,`treatment|p-value`)
+  colnames(file) = c("Gene", paste0("mean_",i), paste0("pval_",i))
+  assign(paste0("mle_",i), file)
+}
+
+data = list(mle_1, mle_2, mle_3) %>% 
+  purrr::reduce(full_join)
+
+data_all = 
+  data %>% 
+  drop_na() %>% 
+  rowwise() %>% 
+  mutate(mean = mean(c(mean_1, mean_2, mean_3)),
+         sd = sd(c(mean_1, mean_2, mean_3)),
+         pval = mean(c(pval_1, pval_2, pval_3))) %>% 
+  dplyr::select(Gene, mean, sd, pval)
+
+# Replacing the pvalues = 0 into pval = 10^-5.5 to fit on the graph
+
+data_all[data_all$pval==0,]$pval = 10^-5.5
+
+data = 
+  data_all %>% 
+    filter(pval<= 0.05)
+
+boxplot(data$mean)
+median(data$mean)
+
+outliers = 
+  data %>% 
+  filter(mean < quantile(data$mean)[2]|mean > quantile(data$mean)[4])
+
+down = 
+  data %>% 
+  filter(mean < -0.3)
+
+outliers %>% 
+  head(15) %>% 
+  knitr::kable()
+
+dim(outliers)
+
+```
+
+Quand je filtre pour pval \< 0.05, j'ai 288 outliers pour les MLE
+compparé aux 261 de Raphaële. On va partir de la liste des outliers
+MLE+RRA qu'elle a fournie pour la suite.
+
+# Possible plots
+
+```{r}
+
+outliers = read_xlsx("./data/RAB117_outliers_MLE+RRA.xlsx", sheet = "Outliers RRA+MLE") %>% 
+  dplyr::select(Gene)
+
+outliers = 
+  outliers %>% 
+  add_row(Gene = c("Gcn1l1", "Slc7a5","Eif2ak4", "Atf4")) # On rajoute les ctrl neg
+
+data1 =
+  data %>% 
+  filter(Gene%in%outliers$Gene)
+
+```
+
+## MLE : pval and mean
+
+```{r, fig.height=5, fig.width=5}
+
+data_all %>% 
+  filter(!is.na(pval)) %>% 
+  ggplot(aes(x = mean, y = -log10(pval), label = Gene))+
+  geom_point(size = .5, color = 'grey')+
+  theme_bw()+
+  scale_y_continuous(limits = c(-.2,6)) +
+  geom_point(data = data1, size = 1, color = "firebrick") +
+  geom_point(data = data1 %>% filter(Gene %in% c("Gcn1l1", "Slc7a5","Eif2ak4","Atf4")), 
+             color = "blue", size = 1) +
+  geom_text_repel(data = subset(data_all, Gene%in%outliers$Gene),
+                  box.padding = 0.25,
+                  segment.color = 'grey50',
+                  max.overlaps = 30,
+                  fontface = "italic")+
+  annotate(geom="text", x=-0.75, y=0, label="Negative hits",color="blue")+
+  annotate(geom="text", x=0.85, y=0, label="Positive hits",color="firebrick3")+
+  annotate(geom="text", x=0.4, y=5, label="p-value < 10e-5",color="black", fontface = "italic")+
+   theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())+
+  labs(x = "Mean beta score (n=3)", y = "-Log10(mean(p-value)) (n = 3)",
+       title = "MLE+RRA outliers highlighted", subtitle =  "(and negative controls)")
+
+```
+
+```{r, fig.height=3, fig.width=4}
+
+outliers = read_xlsx("./data/RAB117_outliers_MLE+RRA.xlsx", sheet = "Outliers RRA+MLE") %>% 
+  dplyr::select(Gene) # Relire le fichier mais sans ajouter les ctrl neg
+
+data1 =
+  data %>% 
+  filter(Gene%in%outliers$Gene)
+
+data_all %>% 
+  filter(!is.na(pval)) %>% 
+  ggplot(aes(x = mean, y = -log10(pval), label = Gene))+
+  geom_point(size = .5, color = 'grey')+
+  theme_bw()+
+  scale_y_continuous(limits = c(-.2,6)) +
+  geom_point(data = data1, 
+             size = .5, color = "firebrick") +
+  geom_label_repel(data = subset(data_all, Gene%in%outliers$Gene),
+                  box.padding   = 0.35, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50',
+                  max.overlaps = 20)+
+  labs(x = "Mean beta score (n=3)", y = "-Log10(mean(p-value)) (n = 3)",
+       title = "MLE+RRA outliers highlighted")
+
+```
+
+```{r, fig.height=3, fig.width=4}
+
+negctrl = c("Gcn1l1", "Slc7a5","Eif2ak4")
+
+data1 =
+  data %>% 
+  filter(Gene%in%negctrl)
+
+data_all %>% 
+  filter(!is.na(pval)) %>% 
+  ggplot(aes(x = mean, y = -log10(pval), label = Gene))+
+  geom_point(size = .5, color = 'grey')+
+  theme_bw()+
+  scale_y_continuous(limits = c(-.2,6)) +
+  geom_point(data = data1, 
+             size = .5, color = "blue") +
+  geom_label_repel(data = subset(data_all, Gene%in%c("Gcn1l1", "Slc7a5","Eif2ak4")),
+                  box.padding   = 0.35, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50',
+                  max.overlaps = 50)+
+  labs(x = "Mean beta score (n=3)", y = "-Log10(mean(p-value)) (n = 3)",
+       title = "MLE+RRA negative controls highlighted")
+
+```
+
+## RRA : pval and mean
+
+Il faudrait retrouver les fichiers avec les pvaleurs, je peux pas plotter sinon.
+
+## Number of gene attributed at random
+
+```{r}
+
+data_all$number = sample(1:nrow(data_all)) # adding a random number to each gene
+
+data1 =
+  data_all %>% 
+  filter(Gene%in%outliers$Gene)
+
+data_all %>% 
+  ggplot(aes(x = number, y = -log10(pval), label = Gene))+
+  geom_point(size = .5, color = 'grey')+
+  theme_bw()+
+  geom_point(data = data1, 
+             size = .5, color = "firebrick") +
+  geom_label_repel(data = subset(data_all, Gene%in%outliers$Gene),
+                  box.padding   = 0.35, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50',
+                  max.overlaps = 10)
+```
+
+## Number of gene attributed not at random
+
+```{r, fig.height=6, fig.width=8}
+
+data_all =
+  data_all %>% 
+  arrange(pval)
+
+data_all$number = c(1:nrow(data_all)) # addind ordered row numbers
+
+data1 =
+  data_all %>% 
+  filter(Gene%in%outliers$Gene)
+
+data_all %>% 
+  ggplot(aes(x = number, y = -log10(pval), label = Gene))+
+  geom_line(size = .5, color = 'black')+
+  theme_bw()+
+  geom_point(data = data1, 
+             size = 1, color = "firebrick") +
+  geom_label_repel(data = subset(data_all, Gene%in%outliers$Gene),
+                  box.padding   = 0.35, 
+                  point.padding = 0.5,
+                  segment.color = 'grey50',
+                  max.overlaps = 45)
+```
+
+# ORA
+
+## Gene ontology
+
+### On the 577 significant genes (not specifically the outliers)
+
+```{r, fig.height=12, fig.width=8}
+
+# Créer la liste de gènes à analyser pour enrichissement
+
+data_sign = data_all %>% filter(pval <= 0.05)
+
+# Set the randomness number (makes it reproducible for anyone)
+# Is setting the seed for all the following code to the end of the document
+
+set.seed(054057)
+
+# Check ORA
+ora_results_go <- enrichGO(
+  gene = data_sign$Gene,
+  universe = data_all$Gene,
+  keyType = "SYMBOL",
+  OrgDb = org.Mm.eg.db,
+  ont = "BP",
+  pAdjustMethod = "BH")
+
+# Barplot
+barplot(ora_results_go, showCategory = 30, order = TRUE,
+        x = "Count")+ 
+  ggtitle("Enrichment analysis gRNA trp+/-")+
+   theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())
+
+# Table
+ora_results_go %>% 
+  as_tibble() %>% 
+  head(10) %>% 
+  dplyr::select(1:6) %>%
+  knitr::kable()
+
+```
+
+### On the 177 positive outliers
+
+```{r, fig.height=12, fig.width=8}
+
+data_outliers = data_all %>% filter(pval <= 0.05, Gene%in%outliers$Gene)
+
+ora_results_go1 <- enrichGO(
+  gene = data_outliers$Gene,
+  universe = data_sign$Gene,
+  keyType = "SYMBOL",
+  OrgDb = org.Mm.eg.db,
+  ont = "ALL",
+  pAdjustMethod = "BH")
+
+barplot(ora_results_go1%>% filter(ONTOLOGY == "BP"), showCategory = 30, order = TRUE,
+        x = "Count")+ 
+  ggtitle("Enrichment analysis gRNA trp+/-")+
+   theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())
+
+dotplot(ora_results_go1 %>% filter(ONTOLOGY == "BP"), showCategory = 30)+ ggtitle("Enrichment analysis gRNA trp+/-")+
+   theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())
+
+ora_results_go1 %>% 
+  as_tibble() %>% 
+  head(10) %>% 
+  dplyr::select(1:6) %>%
+  knitr::kable()
+
+```
+
+### On the 144 negative outliers
+
+```{r, fig.height=7, fig.width=7}
+
+data_all %>% 
+  filter(!is.na(pval)) %>% 
+  ggplot(aes(x = mean, y = -log10(pval), label = Gene))+
+  geom_point(size = .5, color = 'grey')+
+  theme_bw()+
+  scale_y_continuous(limits = c(-.2,6)) +
+  geom_point(data = down, size = 1, color = "blue") +
+  geom_text_repel(data = subset(data_all, Gene%in%down$Gene),
+                  box.padding = 0.25,
+                  segment.color = 'grey50',
+                  max.overlaps = 30,
+                  fontface = "italic")+
+  annotate(geom="text", x=-0.75, y=0, label="Negative hits",color="blue")+
+   theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())+
+  labs(x = "Mean beta score (n=3)", y = "-Log10(mean(p-value)) (n = 3)",
+       title = "MLE+RRA outliers highlighted", subtitle =  "(and negative controls)")
+```
+
+```{r, fig.height=12, fig.width=8}
+
+data_outliersdown = data_all %>% filter(pval <= 0.05, Gene%in%down$Gene)
+
+ora_results_go1 <- enrichGO(
+  gene = data_outliersdown$Gene,
+  universe = data_sign$Gene,
+  keyType = "SYMBOL",
+  OrgDb = org.Mm.eg.db,
+  ont = "ALL",
+  pAdjustMethod = "BH")
+
+barplot(ora_results_go1%>% filter(ONTOLOGY == "BP"), showCategory = 30, order = TRUE,
+        x = "Count")+ 
+  ggtitle("Enrichment analysis gRNA trp+/-")+
+   theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())
+
+dotplot(ora_results_go1 %>% filter(ONTOLOGY == "BP"), showCategory = 30)+ 
+  ggtitle("Enrichment analysis gRNA trp+/-")+
+   theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())
+
+ora_results_go1 %>% 
+  as_tibble() %>% 
+  head(10) %>% 
+  dplyr::select(1:6) %>%
+  knitr::kable()
+
+```
+
+## Reactome
+
+### On the 577 significant genes (not specifically the outliers)
+
+```{r, fig.height=12, fig.width=8}
+
+data_sign = data_all %>% filter(pval <= 0.05)
+annot = read.csv("./data/Biomart_annotations_mm10.csv") # read my annotation file
+temp = left_join(data_sign, annot, by = c("Gene" = "gene")) # concatenate the tables
+
+gene_list <-  temp$ENTREZID
+
+ora_results_react <- enrichPathway(gene_list,
+                                organism = "mouse",
+                                readable = T)
+
+dotplot(ora_results_react)+ 
+  ggtitle("Enrichment analysis gRNA trp+/-")+
+   theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())
+
+ora_results_react@result %>% 
+  as_tibble() %>% 
+  dplyr::select(1:6) %>% 
+  head(10) %>% 
+  knitr::kable()
+
+```
+
+### On the positive 177 outliers
+
+```{r, fig.height=8, fig.width=8}
+
+temp = left_join(data_outliers, annot, by = c("Gene" = "gene"))
+lookup  <-  temp$ENTREZID
+
+## Let's try another way to annotate the genes
+
+library(org.Mm.eg.db)
+lookup = select(org.Mm.eg.db, keys = temp$Gene, keytype = "SYMBOL", columns = c("ENTREZID", "SYMBOL"))
+
+ora_results_react1 <- enrichPathway(lookup$ENTREZID,
+                                organism = "mouse",
+                                readable = T)
+
+dotplot(ora_results_react1)+ 
+  ggtitle("Enrichment analysis gRNA trp+/-")+
+   theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())
+
+temp = 
+  ora_results_react1@result %>% 
+  as_tibble() 
+
+temp %>% 
+  dplyr::select(1:6) %>% 
+  head(10) %>% 
+  knitr::kable()
+
+# library(xlsx)
+# write.xlsx(temp,"./data_output/ORA_reactome_177_targets.xlsx")
+
+```
+
+### On the negative 144 outliers
+
+```{r, fig.height=8, fig.width=8}
+
+temp1 = left_join(data_outliersdown, annot, by = c("Gene" = "gene"))
+gene_list <-  temp1$ENTREZID
+
+ora_results_react1 <- enrichPathway(gene_list,
+                                organism = "mouse",
+                                readable = T)
+
+dotplot(ora_results_react1)+ 
+  ggtitle("Enrichment analysis gRNA trp+/-")+
+   theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())
+
+ora_results_react1@result %>% 
+  as_tibble() %>% 
+  dplyr::select(1:6) %>% 
+  head(10) %>% 
+  knitr::kable()
+```
+
+# Highlight genes per found role
+
+## Outliers found in GO terms (BP and CC)
+
+```{r, fig.height=12, fig.width=8}
+
+data_outliers = data_all %>% filter(pval <= 0.05, Gene%in%outliers$Gene)
+
+ora_results_go1 <- enrichGO(
+  gene = data_outliers$Gene,
+  universe = data_sign$Gene,
+  keyType = "SYMBOL",
+  OrgDb = org.Mm.eg.db,
+  ont = "ALL",
+  pAdjustMethod = "BH")
+
+ora_results_go1 %>% 
+  as_tibble() %>% 
+  head(30) %>% 
+  dplyr::select(1:6) %>%
+  knitr::kable()
+
+```
+
+Organize by theme
+
+-   BP Mitochondrial gene expression (encompasses mitochondrial
+    translation)
+
+-   BP ATP metabolic process (encompasses proton-motive force driven ATP
+    prod)
+
+-   CC respiratory chain complex I
+
+-   BP oxidative phosphorylation
+
+## Outliers found in reactome
+
+```{r, fig.height=8, fig.width=8}
+
+temp = left_join(data_outliers, annot, by = c("Gene" = "gene"))
+gene_list <-  temp$ENTREZID
+
+ora_results_react1 <- enrichPathway(gene_list,
+                                organism = "mouse",
+                                readable = T)
+
+ora_results_react1@result %>% 
+  as_tibble() %>% 
+  dplyr::select(1:4) %>% 
+  head(30) %>% 
+  knitr::kable()
+
+```
+
+## Organize and highlight targets by theme and functions
+
+```{r}
+
+outliers = 
+  outliers %>% 
+  add_row(Gene = c("Gcn1l1", "Slc7a5","Eif2ak4", "Atf4"))
+
+data1 =
+  data %>% 
+  filter(Gene%in%outliers$Gene)
+
+# Get the genes listed in position x of reactome ORA results
+translation = unique(unlist(c(strsplit(ora_results_react1$geneID[[1]],"/"),
+  strsplit(ora_results_react1$geneID[[2]],"/"),
+  strsplit(ora_results_react1$geneID[[3]],"/"),
+  strsplit(ora_results_react1$geneID[[4]],"/"))))
+
+TCA = unique(unlist(c(strsplit(ora_results_react1$geneID[[5]],"/"),
+  strsplit(ora_results_react1$geneID[[6]],"/"),
+  strsplit(ora_results_react1$geneID[[7]],"/"),
+  strsplit(ora_results_react1$geneID[[8]],"/"))))
+
+other = unique(unlist(c(strsplit(ora_results_react1$geneID[[9]],"/"),
+  strsplit(ora_results_react1$geneID[[10]],"/"),
+  strsplit(ora_results_react1$geneID[[11]],"/"),
+  strsplit(ora_results_react1$geneID[[12]],"/"),
+  strsplit(ora_results_react1$geneID[[13]],"/"))))
+
+the_rest = outliers$Gene[!(outliers$Gene %in% c(translation, TCA, other))]
+
+labels = c("Mrpl28","Ndufa2","Ndufc2","Mrps25","Atp5b","Ndufa8",
+           "Cand1","Gcn1l1", "Slc7a5","Eif2ak4","Atf4","Mrpl45", "Atp5o",
+           "Mrpl20","Ndufa1","Gadd45gip1","Cars2","Ears2")
+  
+```
+
+
+```{r}
+
+data_all %>% 
+  filter(!is.na(pval)) %>% 
+  ggplot(aes(x = mean, y = -log10(pval), label = Gene))+
+  geom_point(size = .5, color = 'grey90', alpha = 0.4)+
+  theme_bw()+
+  scale_y_continuous(limits = c(-.2,6)) +
+  geom_point(data = data1 %>% filter(Gene %in% the_rest), 
+             color = "grey70", size = 2) +
+  geom_point(data = data1 %>% filter(Gene %in% translation), 
+             fill = "#ffa73e", size = 2, shape = 21) +
+  geom_point(data = data1 %>% filter(Gene %in% TCA), 
+             fill = "lightskyblue1", size = 2, shape = 21, alpha = 1) +
+  geom_point(data = data1 %>% filter(Gene %in% other), 
+             fill = "grey50", size = 2, shape = 21, fill = "white") +
+  geom_point(data = data1 %>% filter(Gene %in% c("Gcn1l1", "Slc7a5","Eif2ak4","Atf4")), 
+             color = "grey70", size = 2) +
+  geom_text_repel(data = subset(data_all, Gene%in%labels),
+                  box.padding = 0.4,
+                  segment.color = 'grey50',
+                  segment.size = 0.2,
+                  max.overlaps = 10,
+                  fontface = "italic",
+                  size = 3,
+                  point.size = 10,
+                  min.segment.length = 0)+
+  annotate(geom="text", x=-0.75, y=0, label="Negative hits",color="black")+
+  annotate(geom="text", x=0.85, y=0, label="Positive hits",color="black")+
+  annotate(geom="text", x=-0.8, y=5.5, label="p-value < 10e-5",color="black", 
+           fontface = "italic", size = 3)+
+   theme(axis.line = element_line(color='black'),
+    plot.background = element_blank(),
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank())+
+  labs(x = "Mean beta score (n=3)", y = "-Log10(mean(p-value)) (n = 3)",
+       title = "MLE+RRA outliers highlighted", subtitle =  "(and negative controls)")
+
+ggsave(plot = last_plot(),"./figures/MLE_RRA_ORA_targets.svg", device = "svg",
+       dpi = 300, height = 4, width = 4)
+
+ggsave(plot = last_plot(),"./figures/MLE_RRA_ORA_targets.png", device = "png",
+       dpi = 300, height = 4, width = 5.5)
+```
+
+```{r}
+sessionInfo()
+```
