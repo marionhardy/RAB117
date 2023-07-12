@@ -6,7 +6,7 @@ Algorithms used for enrichment quantification: MLE and RRA
 
 ## Plots produced
 
-- Mean and p-value
+- Mean beta score and p-value
 - Number of gene attributed at random and p-value
 - Fixed number of gene and p-value
 
